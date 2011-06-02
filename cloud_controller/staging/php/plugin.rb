@@ -10,13 +10,27 @@ class PhpPlugin < StagingPlugin
       create_app_directories
       copy_source_files
       create_startup_script
-      create_lighttpd_config
+      create_nginx_config
     end
   end
 
-  def start_command
-    # We can't pass through $@, since the -p makes lighttpd dump out its config
-    "lighttpd -f ../lighttpd.config -D"
+  def start_app_template
+    <<-SCRIPT
+    <%= nginx_start_command %> > ../logs/stdout.log 2> ../logs/stderr.log &
+    NGINX_STARTED=$!
+    echo "$NGINX_STARTED" >> ../run.pid
+    <%= php_start_command %> >> ../logs/stdout.log 2>> ../logs/stderr.log &
+    PHP_STARTED=$!
+    SCRIPT
+  end
+
+  def nginx_start_command
+    # We don't pass through $@, since Nginx accepts essentially no useful argument
+    "nginx -c ../nginx.config"
+  end
+  
+  def php_start_command
+    "PHP_FCGI_CHILDREN=0 PHP_FCGI_MAX_REQUESTS=10000 /usr/bin/php-cgi -b $HOME/php.socket"
   end
 
   # Nicer kill script that attempts an INT first, and then only if the process doesn't die will
@@ -24,61 +38,62 @@ class PhpPlugin < StagingPlugin
   def stop_script_template
     <<-SCRIPT
     #!/bin/bash
-    MAX_NICE_KILL_ATTEMPTS=20
-    attempts=0
-    kill -INT $STARTED
-    while pgrep $STARTED >/dev/null; do
-      (( ++attempts >= MAX_NICE_KILL_ATTEMPTS )) && break
-      sleep 1
-    done
-    pgrep $STARTED && kill -9 $STARTED
+    kill -9 $NGINX_STARTED
+    kill -9 $PHP_STARTED 
     kill -9 $PPID
+    SCRIPT
+  end
+
+  def wait_app_template
+    <<-SCRIPT
+    wait $NGINX_STARTED $PHP_STARTED
     SCRIPT
   end
 
   private
   def startup_script
     vars = environment_hash
-    generate_startup_script(vars)
+    generate_startup_script(vars) do
+      # Nginx has no support for using environment variables in the config file. So we do it
+      # for it using sed at the last minute.
+      <<-SCRIPT
+      cat nginx.config.template | \
+        sed 's!ENV_VMC_APP_PORT!'"$VMC_APP_PORT"'!' | \
+        sed 's!ENV_PWD!'"$PWD"'!' | \
+        sed 's!ENV_HOME!'"$HOME"'!' >nginx.config
+      SCRIPT
+    end
   end
 
-  def create_lighttpd_config
-    File.open('lighttpd.config', 'w') do |f|
+  def create_nginx_config
+    File.open('nginx.config.template', 'w') do |f|
       f.write <<-EOT
-      server.document-root = var.CWD
-      server.port = env.VMC_APP_PORT
+      daemon off;
+      
+      error_log ../logs/app.error.log;
+      
+      http {
+        include    /etc/nginx/mime.types;
+        
+        sendfile     on;
+        tcp_nopush   on;
+        
+        server {
+            listen       ENV_VMC_APP_PORT;
+            server_name  _;
+            access_log   ../logs/app.access.log  main;
+            root         ENV_PWD;
 
-      mimetype.assign = (
-        ".html" => "text/html", 
-        ".txt" => "text/plain",
-        ".css" => "text/css",
-        ".jpg" => "image/jpeg",
-        ".png" => "image/png"
-      )
-      
-      server.modules   += ( "mod_access", "mod_accesslog")
-      index-file.names = ( "index.html", "index.php" )
-      
-      server.modules   += ( "mod_fastcgi" )
+            location / {
+              index    index.html index.htm index.php;
+            }
 
-      ## Start an FastCGI server for php (needs the php5-cgi package)
-      fastcgi.server    = ( ".php" =>
-        ((
-          "bin-path" => "/usr/bin/php-cgi",
-          "socket" => env.HOME + "/php.socket",
-          "max-procs" => 1,
-          "idle-timeout" => 20,
-          "bin-environment" => (
-                  "PHP_FCGI_CHILDREN" => "0",
-                  "PHP_FCGI_MAX_REQUESTS" => "10000"
-          ),
-          "bin-copy-environment" => (
-                  "PATH", "SHELL", "USER", "VCAP_SERVICES"
-          ),
-          "broken-scriptfilename" => "enable"
-        ))
-      )
-      
+            location ~ \.php$ {
+              include /etc/nginx/fastcgi_params;
+              fastcgi_pass  unix:ENV_HOME/php.socket;
+            }
+          }
+        }
       EOT
     end
   end

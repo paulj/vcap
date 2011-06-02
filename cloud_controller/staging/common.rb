@@ -385,16 +385,22 @@ class StagingPlugin
 <%= environment_statements_for(env_vars) %>
 <%= after_env_before_script %>
 <%= change_directory_for_start %>
-<%= start_command %> > ../logs/stdout.log 2> ../logs/stderr.log &
-STARTED=$!
-echo "$STARTED" >> ../run.pid
+<%= start_app_template %>
 <%= stop_script_template.lines.map { |l| "echo " + l.strip.inspect + " >> ../stop\n" }.join %>
 chmod 755 ../stop
-wait $STARTED
+<%= wait_app_template %>
     SCRIPT
     # TODO - ERB is pretty irritating when it comes to blank lines, such as when 'after_env_before_script' is nil.
     # There is probably a better way that doesn't involve making the above Heredoc horrible.
     ERB.new(template).result(binding).lines.reject {|l| l =~ /^\s*$/}.join
+  end
+  
+  def start_app_template
+    <<-SCRIPT
+    <%= start_command %> > ../logs/stdout.log 2> ../logs/stderr.log &
+    STARTED=$!
+    echo "$STARTED" >> ../run.pid
+    SCRIPT
   end
   
   def stop_script_template
@@ -402,6 +408,12 @@ wait $STARTED
     #!/bin/bash
     kill -9 $STARTED
     kill -9 $PPID
+    SCRIPT
+  end
+  
+  def wait_app_template
+    <<-SCRIPT
+    wait $STARTED
     SCRIPT
   end
 
