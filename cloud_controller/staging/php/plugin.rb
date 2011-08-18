@@ -1,3 +1,5 @@
+require File.expand_path('../../nginx_common/nginx', __FILE__)
+
 class PhpPlugin < StagingPlugin
   # TODO - Is there a way to avoid this without some kind of 'register' callback?
   # e.g. StagingPlugin.register('sinatra', __FILE__)
@@ -8,29 +10,33 @@ class PhpPlugin < StagingPlugin
   def stage_application
     Dir.chdir(destination_directory) do
       create_app_directories
+      phpapp_root = Nginx.prepare(destination_directory)
       copy_source_files
       create_startup_script
-      create_nginx_config
     end
   end
 
   def start_app_template
     <<-SCRIPT
-    <%= nginx_start_command %> > ../logs/stdout.log 2> ../logs/stderr.log &
-    NGINX_STARTED=$!
-    echo "$NGINX_STARTED" >> ../run.pid
-    <%= php_start_command %> >> ../logs/stdout.log 2>> ../logs/stderr.log &
+    #{start_command} > ../logs/stdout.log 2> ../logs/stderr.log &
     PHP_STARTED=$!
+    NGINX_STARTED=`cat nginx_cloudfoundry/sbin/nginx.pid`
+    echo "$PHP_STARTED" >> ../run.pid
+    PHP_PROCESS='`pgrep -P '$PHP_STARTED'`'
+    NGINX_PROCESS='`pgrep -P '$NGINX_STARTED'`'
+    PROCESS='$i'
     SCRIPT
   end
 
-  def nginx_start_command
-    # We don't pass through $@, since Nginx accepts essentially no useful argument
-    "nginx -c ../nginx.config"
+  def start_command
+      cmds = []
+      cmds << "nginx_cloudfoundry/sbin/nginx"
+      cmds << "#{php_start_command}"
+      cmds.join("\n")
   end
-  
+
   def php_start_command
-    "PHP_FCGI_CHILDREN=0 PHP_FCGI_MAX_REQUESTS=10000 /usr/bin/php-cgi -b $HOME/php.socket"
+    "PHP_FCGI_CHILDREN=5 PHP_FCGI_MAX_REQUESTS=10000 /usr/bin/php-cgi -b $HOME/php.socket"
   end
 
   # Nicer kill script that attempts an INT first, and then only if the process doesn't die will
@@ -38,15 +44,24 @@ class PhpPlugin < StagingPlugin
   def stop_script_template
     <<-SCRIPT
     #!/bin/bash
-    kill -9 $NGINX_STARTED
-    kill -9 $PHP_STARTED 
+    for i in $PHP_PROCESS; do
+      kill -9 $PHP_STARTED
+      kill -9 $PROCESS
+      wait $PROCESS
+    done
+    for i in $NGINX_PROCESS; do
+      kill -9 $NGINX_STARTED
+      kill -9 $PROCESS
+      wait $PROCESS
+    done
     kill -9 $PPID
     SCRIPT
   end
 
   def wait_app_template
     <<-SCRIPT
-    wait $NGINX_STARTED $PHP_STARTED
+    wait $PHP_STARTED
+    wait $NGINX_STARTED
     SCRIPT
   end
 
@@ -57,45 +72,12 @@ class PhpPlugin < StagingPlugin
       # Nginx has no support for using environment variables in the config file. So we do it
       # for it using sed at the last minute.
       <<-SCRIPT
-      cat nginx.config.template | \
-        sed 's!ENV_VMC_APP_PORT!'"$VMC_APP_PORT"'!' | \
-        sed 's!ENV_PWD!'"$PWD"'!' | \
-        sed 's!ENV_HOME!'"$HOME"'!' >nginx.config
+      cat app/nginx_cloudfoundry/conf/nginx.conf.template | \
+        sed 's!VCAP_APP_PORT!'"$VCAP_APP_PORT"'!' | \
+        sed 's!HOME!'"$HOME"'!' > app/nginx_cloudfoundry/conf/nginx.conf
       SCRIPT
     end
   end
 
-  def create_nginx_config
-    File.open('nginx.config.template', 'w') do |f|
-      f.write <<-EOT
-      daemon off;
-      
-      error_log ../logs/app.error.log;
-      
-      http {
-        include    /etc/nginx/mime.types;
-        
-        sendfile     on;
-        tcp_nopush   on;
-        
-        server {
-            listen       ENV_VMC_APP_PORT;
-            server_name  _;
-            access_log   ../logs/app.access.log  main;
-            root         ENV_PWD;
-
-            location / {
-              index    index.html index.htm index.php;
-            }
-
-            location ~ \.php$ {
-              include /etc/nginx/fastcgi_params;
-              fastcgi_pass  unix:ENV_HOME/php.socket;
-            }
-          }
-        }
-      EOT
-    end
-  end
 end
 

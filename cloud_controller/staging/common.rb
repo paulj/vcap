@@ -397,7 +397,7 @@ chmod 755 ../stop
   
   def start_app_template
     <<-SCRIPT
-    <%= start_command %> > ../logs/stdout.log 2> ../logs/stderr.log &
+    #{start_command} > ../logs/stdout.log 2> ../logs/stderr.log &
     STARTED=$!
     echo "$STARTED" >> ../run.pid
     SCRIPT
